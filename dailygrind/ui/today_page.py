@@ -447,6 +447,7 @@ class TodayPage(tk.Frame):
 
     def _build_task_card(self, state: TaskState) -> tk.Frame:
         task = state.task
+        is_vocab = task.kind == "vocab"
         border_color = th.tint(task.color, 0.62) if state.completed else th.BORDER
         card = tk.Frame(
             self.content,
@@ -519,6 +520,20 @@ class TodayPage(tk.Frame):
                 pady=4,
                 parent_bg=th.CARD,
             ).pack(side="right", pady=S(10))
+        elif is_vocab:
+            RoundedButton(
+                top,
+                "去背单词",
+                self.app.open_vocab_study,
+                fill=th.GREEN,
+                hover_fill=th.shade(th.GREEN, 0.08),
+                pressed_fill=th.shade(th.GREEN, 0.16),
+                text_color=th.WHITE,
+                bg=th.CARD,
+                padx=13,
+                pady=5,
+                font_size=9,
+            ).pack(side="right", pady=S(6))
         else:
             RoundedButton(
                 top,
@@ -546,6 +561,25 @@ class TodayPage(tk.Frame):
             font=font(9, "bold"),
             anchor="w",
         ).grid(row=0, column=0, sticky="w")
+
+        if is_vocab:
+            TextButton(
+                bottom,
+                "词库自动记录",
+                lambda: self.app.navigate("vocab"),
+                fg=th.FAINT,
+                hover_fg=th.GREEN,
+                bg=th.CARD,
+                font_size=8,
+            ).grid(row=0, column=1, sticky="w", padx=(S(7), S(12)))
+            progress = ProgressBar(bottom, bg=th.CARD)
+            progress.grid(row=0, column=2, sticky="ew", padx=(0, S(12)))
+            progress.set(
+                state.percent,
+                task.color if not state.completed else th.GREEN,
+            )
+            return card
+
         TextButton(
             bottom,
             "修改",

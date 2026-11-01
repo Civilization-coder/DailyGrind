@@ -42,6 +42,7 @@ DEFAULT_TASKS = (
         "icon": "词",
         "color": "#C97845",
         "step": 5,
+        "kind": "vocab",
     },
     {
         "title": "六级真题",
@@ -64,6 +65,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     title       TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
+    kind        TEXT NOT NULL DEFAULT 'manual',
     target      INTEGER NOT NULL CHECK(target > 0),
     unit        TEXT NOT NULL DEFAULT '次',
     icon        TEXT NOT NULL DEFAULT '日',
@@ -93,6 +95,41 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS vocab_progress (
+    word          TEXT PRIMARY KEY,
+    first_seen    TEXT NOT NULL,
+    last_seen     TEXT NOT NULL,
+    next_review   TEXT NOT NULL,
+    interval_days INTEGER NOT NULL DEFAULT 1,
+    ease          REAL NOT NULL DEFAULT 2.5,
+    correct_count INTEGER NOT NULL DEFAULT 0,
+    wrong_count   INTEGER NOT NULL DEFAULT 0,
+    seen_count    INTEGER NOT NULL DEFAULT 0,
+    known         INTEGER NOT NULL DEFAULT 0,
+    last_result   TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS vocab_days (
+    day        TEXT PRIMARY KEY,
+    target     INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS vocab_plan (
+    day       TEXT NOT NULL,
+    word      TEXT NOT NULL,
+    kind      TEXT NOT NULL CHECK(kind IN ('new', 'review')),
+    position  INTEGER NOT NULL,
+    completed INTEGER NOT NULL DEFAULT 0,
+    correct   INTEGER NOT NULL DEFAULT 0,
+    known     INTEGER NOT NULL DEFAULT 0,
+    attempts  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, word)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vocab_plan_day ON vocab_plan(day, position);
+CREATE INDEX IF NOT EXISTS idx_vocab_review ON vocab_progress(known, next_review);
 """
 
 
@@ -119,6 +156,7 @@ class Store:
     def _initialize(self) -> None:
         self.conn.executescript(SCHEMA)
         with self.conn:
+            self._migrate()
             if self.get_setting("initialized") is None:
                 self._seed_defaults()
                 self.set_setting("tracking_start", self._today().isoformat())
@@ -126,7 +164,37 @@ class Store:
             for key, value in DEFAULT_SETTINGS.items():
                 if self.get_setting(key) is None:
                     self.set_setting(key, value)
-            self.conn.execute("PRAGMA user_version = 1")
+            self._ensure_vocab_task()
+            self.conn.execute("PRAGMA user_version = 2")
+
+    def _migrate(self) -> None:
+        columns = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "kind" not in columns:
+            self.conn.execute(
+                "ALTER TABLE tasks ADD COLUMN kind TEXT NOT NULL DEFAULT 'manual'"
+            )
+
+    def _ensure_vocab_task(self) -> None:
+        existing = self.conn.execute(
+            "SELECT id FROM tasks WHERE kind = 'vocab' LIMIT 1"
+        ).fetchone()
+        if existing is not None:
+            return
+        candidate = self.conn.execute(
+            """
+            SELECT id FROM tasks
+             WHERE title = '六级词汇'
+             ORDER BY id ASC LIMIT 1
+            """
+        ).fetchone()
+        if candidate is not None:
+            self.conn.execute(
+                "UPDATE tasks SET kind = 'vocab' WHERE id = ?",
+                (int(candidate["id"]),),
+            )
 
     def _seed_defaults(self) -> None:
         now = self._now().isoformat(timespec="seconds")
@@ -136,6 +204,7 @@ class Store:
                 (
                     task["title"],
                     task["description"],
+                    task.get("kind", "manual"),
                     task["target"],
                     task["unit"],
                     task["icon"],
@@ -148,9 +217,9 @@ class Store:
         self.conn.executemany(
             """
             INSERT INTO tasks
-                (title, description, target, unit, icon, color, step,
+                (title, description, kind, target, unit, icon, color, step,
                  sort_order, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             rows,
         )
@@ -195,6 +264,7 @@ class Store:
             step=int(row["step"]),
             sort_order=int(row["sort_order"]),
             created_at=str(row["created_at"]),
+            kind=str(row["kind"]),
         )
 
     def list_tasks(self) -> list[Task]:
@@ -209,6 +279,12 @@ class Store:
         ).fetchone()
         return self._row_to_task(row) if row else None
 
+    def get_vocab_task(self) -> Task | None:
+        row = self.conn.execute(
+            "SELECT * FROM tasks WHERE kind = 'vocab' ORDER BY id ASC LIMIT 1"
+        ).fetchone()
+        return self._row_to_task(row) if row else None
+
     def create_task(
         self,
         title: str,
@@ -218,6 +294,7 @@ class Store:
         icon: str = "",
         step: int = 1,
         color: str | None = None,
+        kind: str = "manual",
     ) -> Task:
         clean_title = str(title).strip()
         if not clean_title:
@@ -231,6 +308,7 @@ class Store:
         clean_unit = str(unit).strip() or "次"
         clean_icon = str(icon).strip()[:2] or clean_title[:1]
         clean_description = str(description).strip()
+        clean_kind = kind if kind in {"manual", "vocab"} else "manual"
         created_at = self._now().isoformat(timespec="seconds")
 
         with self.conn:
@@ -241,13 +319,14 @@ class Store:
             cursor = self.conn.execute(
                 """
                 INSERT INTO tasks
-                    (title, description, target, unit, icon, color, step,
+                    (title, description, kind, target, unit, icon, color, step,
                      sort_order, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     clean_title,
                     clean_description,
+                    clean_kind,
                     clean_target,
                     clean_unit,
                     clean_icon,
@@ -523,6 +602,230 @@ class Store:
     def all_settings(self) -> dict[str, str]:
         rows = self.conn.execute("SELECT key, value FROM settings").fetchall()
         return {str(row["key"]): str(row["value"]) for row in rows}
+
+    # ------------------------------------------------------------------
+    # Vocabulary deck
+    # ------------------------------------------------------------------
+    def get_vocab_day(self, day: date | str | None = None) -> dict[str, Any] | None:
+        target_day = self._day_key(day)
+        row = self.conn.execute(
+            "SELECT day, target, created_at FROM vocab_days WHERE day = ?",
+            (target_day,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "day": str(row["day"]),
+            "target": int(row["target"]),
+            "created_at": str(row["created_at"]),
+        }
+
+    def get_vocab_plan(self, day: date | str | None = None) -> list[dict[str, Any]]:
+        target_day = self._day_key(day)
+        rows = self.conn.execute(
+            """
+            SELECT word, kind, position, completed, correct, known, attempts
+              FROM vocab_plan
+             WHERE day = ?
+             ORDER BY position ASC
+            """,
+            (target_day,),
+        ).fetchall()
+        return [
+            {
+                "word": str(row["word"]),
+                "kind": str(row["kind"]),
+                "position": int(row["position"]),
+                "completed": bool(row["completed"]),
+                "correct": bool(row["correct"]),
+                "known": bool(row["known"]),
+                "attempts": int(row["attempts"]),
+            }
+            for row in rows
+        ]
+
+    def create_vocab_plan(
+        self,
+        day: date | str,
+        target: int,
+        items: list[tuple[str, str]],
+    ) -> list[dict[str, Any]]:
+        target_day = self._day_key(day)
+        if self.get_vocab_day(target_day) is not None:
+            return self.get_vocab_plan(target_day)
+        created_at = self._now().isoformat(timespec="seconds")
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO vocab_days (day, target, created_at) VALUES (?, ?, ?)",
+                (target_day, int(target), created_at),
+            )
+            rows = []
+            for position, (word, kind) in enumerate(items, start=1):
+                clean_word = str(word).strip().lower()
+                clean_kind = "review" if kind == "review" else "new"
+                rows.append((target_day, clean_word, clean_kind, position))
+            if rows:
+                self.conn.executemany(
+                    """
+                    INSERT INTO vocab_plan (day, word, kind, position)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+        return self.get_vocab_plan(target_day)
+
+    def get_all_vocab_progress(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT word, first_seen, last_seen, next_review, interval_days,
+                   ease, correct_count, wrong_count, seen_count, known, last_result
+              FROM vocab_progress
+             ORDER BY word ASC
+            """
+        ).fetchall()
+        return [
+            {
+                "word": str(row["word"]),
+                "first_seen": str(row["first_seen"]),
+                "last_seen": str(row["last_seen"]),
+                "next_review": str(row["next_review"]),
+                "interval_days": int(row["interval_days"]),
+                "ease": float(row["ease"]),
+                "correct_count": int(row["correct_count"]),
+                "wrong_count": int(row["wrong_count"]),
+                "seen_count": int(row["seen_count"]),
+                "known": bool(row["known"]),
+                "last_result": str(row["last_result"]),
+            }
+            for row in rows
+        ]
+
+    def get_vocab_progress(self, word: str) -> dict[str, Any] | None:
+        clean_word = str(word).strip().lower()
+        row = self.conn.execute(
+            """
+            SELECT word, first_seen, last_seen, next_review, interval_days,
+                   ease, correct_count, wrong_count, seen_count, known, last_result
+              FROM vocab_progress WHERE word = ?
+            """,
+            (clean_word,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "word": str(row["word"]),
+            "first_seen": str(row["first_seen"]),
+            "last_seen": str(row["last_seen"]),
+            "next_review": str(row["next_review"]),
+            "interval_days": int(row["interval_days"]),
+            "ease": float(row["ease"]),
+            "correct_count": int(row["correct_count"]),
+            "wrong_count": int(row["wrong_count"]),
+            "seen_count": int(row["seen_count"]),
+            "known": bool(row["known"]),
+            "last_result": str(row["last_result"]),
+        }
+
+    def record_vocab_answer(
+        self,
+        day: date | str,
+        word: str,
+        *,
+        correct: bool,
+        known: bool,
+        next_review: date | str,
+        interval_days: int,
+        ease: float,
+    ) -> bool:
+        target_day = self._day_key(day)
+        clean_word = str(word).strip().lower()
+        review_day = self._day_key(next_review)
+        known_int = 1 if known else 0
+        correct_int = 0 if known else (1 if correct else 0)
+        wrong_int = 0 if known or correct else 1
+        attempts = 0 if known else 1
+        result = "known" if known else ("correct" if correct else "wrong")
+
+        with self.conn:
+            plan_row = self.conn.execute(
+                """
+                SELECT completed FROM vocab_plan
+                 WHERE day = ? AND word = ?
+                """,
+                (target_day, clean_word),
+            ).fetchone()
+            if plan_row is None or bool(plan_row["completed"]):
+                return False
+
+            self.conn.execute(
+                """
+                INSERT INTO vocab_progress
+                    (word, first_seen, last_seen, next_review, interval_days,
+                     ease, correct_count, wrong_count, seen_count, known, last_result)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT(word) DO UPDATE SET
+                    last_seen = excluded.last_seen,
+                    next_review = excluded.next_review,
+                    interval_days = excluded.interval_days,
+                    ease = excluded.ease,
+                    correct_count = vocab_progress.correct_count
+                                    + excluded.correct_count,
+                    wrong_count = vocab_progress.wrong_count
+                                  + excluded.wrong_count,
+                    seen_count = vocab_progress.seen_count + 1,
+                    known = excluded.known,
+                    last_result = excluded.last_result
+                """,
+                (
+                    clean_word,
+                    target_day,
+                    target_day,
+                    review_day,
+                    max(1, int(interval_days)),
+                    float(ease),
+                    correct_int,
+                    wrong_int,
+                    known_int,
+                    result,
+                ),
+            )
+            self.conn.execute(
+                """
+                UPDATE vocab_plan
+                   SET completed = 1, correct = ?, known = ?, attempts = ?
+                 WHERE day = ? AND word = ? AND completed = 0
+                """,
+                (
+                    correct_int,
+                    known_int,
+                    attempts,
+                    target_day,
+                    clean_word,
+                ),
+            )
+        return True
+
+    def get_vocab_plan_stats(self, day: date | str | None = None) -> dict[str, int]:
+        target_day = self._day_key(day)
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(completed), 0) AS completed,
+                   COALESCE(SUM(correct), 0) AS correct,
+                   COALESCE(SUM(known), 0) AS known,
+                   COALESCE(SUM(attempts), 0) AS attempts
+              FROM vocab_plan
+             WHERE day = ?
+            """,
+            (target_day,),
+        ).fetchone()
+        return {
+            "total": int(row["total"]),
+            "completed": int(row["completed"]),
+            "correct": int(row["correct"]),
+            "known": int(row["known"]),
+            "attempts": int(row["attempts"]),
+        }
 
     def _day_key(self, day: date | str | None) -> str:
         if day is None:

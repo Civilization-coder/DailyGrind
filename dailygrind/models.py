@@ -38,6 +38,7 @@ class Task:
     step: int
     sort_order: int
     created_at: str = ""
+    kind: str = "manual"
 
     def __post_init__(self) -> None:
         if self.target < 1:

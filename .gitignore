@@ -15,9 +15,10 @@ Thumbs.db
 .idea/
 .vscode/
 
-# Local preview tooling
+# Local preview tooling and data preparation
 _preview*
 _capture*
 _debug*
 _make_icon*
+_vocab_download/
 preview_*.png

@@ -78,6 +78,7 @@ class TaskDialog(tk.Toplevel):
         super().__init__(parent)
         self._on_submit = on_submit
         self._task = task
+        self._is_vocab = bool(task and task.kind == "vocab")
         self._host = parent.winfo_toplevel()
         self.configure(bg=th.CARD)
         self.resizable(False, False)
@@ -116,7 +117,11 @@ class TaskDialog(tk.Toplevel):
         outer = tk.Frame(self, bg=th.CARD)
         outer.pack(fill="both", expand=True, padx=S(28), pady=S(22))
 
-        heading = "编辑任务" if self._task else "添加一项每日任务"
+        heading = (
+            "编辑单词计划"
+            if self._is_vocab
+            else ("编辑任务" if self._task else "添加一项每日任务")
+        )
         tk.Label(
             outer,
             text=heading,
@@ -127,7 +132,11 @@ class TaskDialog(tk.Toplevel):
         ).pack(fill="x")
         tk.Label(
             outer,
-            text="目标要小到今天就能完成，长期才跑得远。",
+            text=(
+                "每日数量包含到期复习词；新数量从下一次计划开始生效。"
+                if self._is_vocab
+                else "目标要小到今天就能完成，长期才跑得远。"
+            ),
             bg=th.CARD,
             fg=th.MUTED,
             font=font(9),
@@ -152,25 +161,48 @@ class TaskDialog(tk.Toplevel):
 
         target_cell = tk.Frame(number_row, bg=th.CARD)
         target_cell.grid(row=0, column=0, sticky="ew", padx=(0, S(8)))
-        self._field_label(target_cell, "每日目标").pack(fill="x")
+        self._field_label(
+            target_cell, "每日单词数" if self._is_vocab else "每日目标"
+        ).pack(fill="x")
         self._target_spin = _make_spinbox(
             target_cell, self._target_var, minimum=1, maximum=9999
         )
         self._target_spin.pack(fill="x", ipady=S(6), pady=(S(6), 0))
 
-        unit_cell = tk.Frame(number_row, bg=th.CARD)
-        unit_cell.grid(row=0, column=1, sticky="ew", padx=S(4))
-        self._field_label(unit_cell, "单位").pack(fill="x")
-        self._unit_entry = _make_entry(unit_cell, self._unit_var)
-        self._unit_entry.pack(fill="x", ipady=S(6), pady=(S(6), 0))
+        if self._is_vocab:
+            tk.Label(
+                number_row,
+                text="每天总计的单词数，包含按计划到期的复习词。",
+                bg=th.CARD,
+                fg=th.MUTED,
+                font=font(8),
+                justify="left",
+                anchor="w",
+                wraplength=S(270),
+            ).grid(
+                row=0,
+                column=1,
+                columnspan=2,
+                sticky="w",
+                padx=(S(12), 0),
+                pady=(S(25), 0),
+            )
+            self._unit_entry = None
+            self._step_spin = None
+        else:
+            unit_cell = tk.Frame(number_row, bg=th.CARD)
+            unit_cell.grid(row=0, column=1, sticky="ew", padx=S(4))
+            self._field_label(unit_cell, "单位").pack(fill="x")
+            self._unit_entry = _make_entry(unit_cell, self._unit_var)
+            self._unit_entry.pack(fill="x", ipady=S(6), pady=(S(6), 0))
 
-        step_cell = tk.Frame(number_row, bg=th.CARD)
-        step_cell.grid(row=0, column=2, sticky="ew", padx=(S(8), 0))
-        self._field_label(step_cell, "每次点击增减").pack(fill="x")
-        self._step_spin = _make_spinbox(
-            step_cell, self._step_var, minimum=1, maximum=9999
-        )
-        self._step_spin.pack(fill="x", ipady=S(6), pady=(S(6), 0))
+            step_cell = tk.Frame(number_row, bg=th.CARD)
+            step_cell.grid(row=0, column=2, sticky="ew", padx=(S(8), 0))
+            self._field_label(step_cell, "每次点击增减").pack(fill="x")
+            self._step_spin = _make_spinbox(
+                step_cell, self._step_var, minimum=1, maximum=9999
+            )
+            self._step_spin.pack(fill="x", ipady=S(6), pady=(S(6), 0))
 
         icon_row = tk.Frame(outer, bg=th.CARD)
         icon_row.pack(fill="x", pady=(0, S(6)))
@@ -299,7 +331,9 @@ class TaskDialog(tk.Toplevel):
         if target < 1 or target > 9999:
             self._show_error("每日目标应在 1 到 9999 之间。")
             return
-        if step < 1 or step > target:
+        if self._is_vocab:
+            step = max(1, min(step, target))
+        elif step < 1 or step > target:
             self._show_error("单次增减应在 1 到每日目标之间。")
             return
 

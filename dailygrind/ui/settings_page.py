@@ -214,9 +214,13 @@ class SettingsPage(tk.Frame):
             font=font(10, "bold"),
             anchor="w",
         ).pack(fill="x")
-        detail = f"每天 {task.target} {task.unit} · 每次 ±{task.step}"
-        if task.description:
-            detail = f"{detail} · {task.description}"
+        is_vocab = task.kind == "vocab"
+        if is_vocab:
+            detail = f"六级真题词频词库 · 每天 {task.target} 个 · 训练后自动打卡"
+        else:
+            detail = f"每天 {task.target} {task.unit} · 每次 ±{task.step}"
+            if task.description:
+                detail = f"{detail} · {task.description}"
         tk.Label(
             copy,
             text=detail,
@@ -225,6 +229,28 @@ class SettingsPage(tk.Frame):
             font=font(8),
             anchor="w",
         ).pack(fill="x", pady=(S(2), 0))
+
+        if is_vocab:
+            TextButton(
+                row,
+                "去背单词",
+                self.app.open_vocab_study,
+                fg=th.GREEN_DARK,
+                hover_fg=th.GREEN,
+                bg=th.CARD,
+                font_size=8,
+                weight="bold",
+            ).pack(side="right", padx=(S(10), 0))
+            TextButton(
+                row,
+                "编辑",
+                lambda current=task: self.app.open_edit_task(current),
+                fg=th.MUTED,
+                hover_fg=th.GREEN,
+                bg=th.CARD,
+                font_size=8,
+            ).pack(side="right")
+            return
 
         TextButton(
             row,

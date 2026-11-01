@@ -1,5 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -43,6 +44,8 @@ class StoreTests(unittest.TestCase):
         )
         self.assertEqual(tasks[1].target, 30)
         self.assertEqual(tasks[1].step, 5)
+        self.assertEqual(tasks[1].kind, "vocab")
+        self.assertEqual(tasks[0].kind, "manual")
         self.assertEqual(self.store.get_setting("reminder_time"), "20:30")
         self.assertEqual(
             self.store.get_tracking_start().isoformat(), "2026-11-01"
@@ -152,6 +155,54 @@ class StoreTests(unittest.TestCase):
                 icon="",
                 step=1,
             )
+
+
+class StoreMigrationTests(unittest.TestCase):
+    def test_old_task_table_gets_vocab_kind(self) -> None:
+        tempdir = tempfile.TemporaryDirectory()
+        path = Path(tempdir.name) / "legacy.db"
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                target INTEGER NOT NULL,
+                unit TEXT NOT NULL DEFAULT '次',
+                icon TEXT NOT NULL DEFAULT '日',
+                color TEXT NOT NULL DEFAULT '#2F7A57',
+                step INTEGER NOT NULL DEFAULT 1,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT INTO tasks (title, description, target, unit, icon, color, step,
+                               sort_order, created_at)
+            VALUES ('六级词汇', '旧任务', 30, '个', '词', '#C97845', 5, 0,
+                    '2026-10-01T09:00:00');
+            INSERT INTO settings (key, value) VALUES
+                ('initialized', '1'),
+                ('tracking_start', '2026-10-01');
+            """
+        )
+        conn.commit()
+        conn.close()
+        store = Store(path)
+        try:
+            task = store.get_vocab_task()
+            self.assertIsNotNone(task)
+            assert task is not None
+            self.assertEqual(task.title, "六级词汇")
+            self.assertEqual(
+                store.conn.execute("PRAGMA user_version").fetchone()[0], 2
+            )
+        finally:
+            store.close()
+            tempdir.cleanup()
 
 
 if __name__ == "__main__":

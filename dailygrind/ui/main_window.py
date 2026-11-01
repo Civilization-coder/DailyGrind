@@ -13,12 +13,14 @@ from ..paths import APP_TITLE, DATA_DIR, ICON_PATH, open_path
 from ..reminders import ReminderScheduler
 from ..startup import is_startup_enabled, set_startup
 from ..store import Store
+from ..vocab import VocabService
 from . import theme as th
 from .calendar_page import CalendarPage
 from .dialogs import ReminderDialog, TaskDialog
 from .settings_page import SettingsPage
 from .theme import S, draw_round_rect, font
 from .today_page import TodayPage
+from .vocab_page import VocabPage
 from .widgets import NavButton, ProgressBar, TextButton
 
 
@@ -32,6 +34,7 @@ class DailyGrindApp:
     ) -> None:
         self.root = root
         self.store = store
+        self.vocab = VocabService(store)
         self.today: date = store.current_date()
         self.start_minimized = start_minimized
 
@@ -45,6 +48,7 @@ class DailyGrindApp:
 
         self._shutting_down = False
         self._tick_job: str | None = None
+        self._ready_job: str | None = None
         self._tick_interval_ms = 1000
         self._modal_depth = 0
         self._task_dialog: TaskDialog | None = None
@@ -66,7 +70,7 @@ class DailyGrindApp:
         self._set_active_nav("today")
         self._bind_shortcuts()
 
-        self.root.after(120, self._on_ready)
+        self._ready_job = self.root.after(120, self._on_ready)
         self._schedule_tick()
 
     # ------------------------------------------------------------------
@@ -190,6 +194,7 @@ class DailyGrindApp:
         self._nav_buttons: dict[str, NavButton] = {}
         nav_items = (
             ("today", "今日计划"),
+            ("vocab", "六级单词"),
             ("calendar", "打卡日历"),
             ("settings", "任务设置"),
         )
@@ -277,6 +282,7 @@ class DailyGrindApp:
     def _build_pages(self) -> None:
         self.pages: dict[str, tk.Frame] = {
             "today": TodayPage(self.page_host, self),
+            "vocab": VocabPage(self.page_host, self),
             "calendar": CalendarPage(self.page_host, self),
             "settings": SettingsPage(self.page_host, self),
         }
@@ -299,6 +305,7 @@ class DailyGrindApp:
             return
         if key == self._current_page_key:
             self._refresh_page(key)
+            self._update_sidebar()
             return
         self._current_page_key = key
         page = self.pages[key]
@@ -384,6 +391,19 @@ class DailyGrindApp:
         if snapshot.all_done:
             self._close_reminder_window()
 
+    def handle_vocab_activity(self) -> None:
+        """Refresh task-facing views after the word trainer records an answer."""
+        self._refresh_page("today")
+        self._update_sidebar()
+        if self.store.get_day_snapshot(self.today).all_done:
+            self._close_reminder_window()
+
+    def open_vocab_study(self) -> None:
+        self.navigate("vocab")
+        page = self.pages.get("vocab")
+        if page is not None:
+            page.start_study()
+
     def open_add_task(self) -> None:
         self._open_task_dialog(None)
 
@@ -427,6 +447,14 @@ class DailyGrindApp:
         dialog.bind("<Destroy>", on_destroy, add="+")
 
     def delete_task(self, task) -> None:
+        if getattr(task, "kind", "manual") == "vocab":
+            messagebox.showinfo(
+                "内置词汇任务",
+                "六级词汇是由词库训练自动打卡的内置任务，不能删除。\n"
+                "可以编辑每日单词数量，或在「六级单词」页直接学习。",
+                parent=self.root,
+            )
+            return
         self.begin_modal()
         try:
             confirmed = messagebox.askyesno(
@@ -585,8 +613,9 @@ class DailyGrindApp:
     def _bind_shortcuts(self) -> None:
         self.root.bind("<Control-q>", lambda _event: self.on_close())
         self.root.bind("<Control-Key-1>", lambda _event: self.navigate("today"))
-        self.root.bind("<Control-Key-2>", lambda _event: self.navigate("calendar"))
-        self.root.bind("<Control-Key-3>", lambda _event: self.navigate("settings"))
+        self.root.bind("<Control-Key-2>", lambda _event: self.navigate("vocab"))
+        self.root.bind("<Control-Key-3>", lambda _event: self.navigate("calendar"))
+        self.root.bind("<Control-Key-4>", lambda _event: self.navigate("settings"))
 
     def on_close(self) -> None:
         if self._shutting_down:
@@ -638,6 +667,12 @@ class DailyGrindApp:
             except tk.TclError:
                 pass
             self._tick_job = None
+        if self._ready_job is not None:
+            try:
+                self.root.after_cancel(self._ready_job)
+            except tk.TclError:
+                pass
+            self._ready_job = None
         self._close_reminder_window()
         try:
             self.root.destroy()

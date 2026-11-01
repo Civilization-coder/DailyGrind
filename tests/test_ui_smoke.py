@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import tempfile
 import tkinter as tk
@@ -53,22 +53,47 @@ class UiSmokeTests(unittest.TestCase):
         self.assertEqual(self.errors, [])
 
     def test_all_pages_render(self) -> None:
-        for page in ("today", "calendar", "settings", "today"):
+        for page in ("today", "vocab", "calendar", "settings", "today"):
             self.app.navigate(page)
             self.pump()
         self.assertEqual(self.app._current_page_key, "today")
 
     def test_progress_actions_update_day_record(self) -> None:
         tasks = self.store.list_tasks()
-        self.app.change_progress(tasks[1].id, 5)
+        self.app.change_progress(tasks[0].id, 1)
         self.pump()
-        self.assertEqual(self.store.get_amounts()[tasks[1].id], 5)
+        self.assertEqual(self.store.get_amounts()[tasks[0].id], 1)
         for task in self.store.list_tasks():
             self.app.complete_task(task.id)
         self.pump()
         self.assertTrue(self.store.is_day_complete())
         self.app.navigate("calendar")
         self.pump()
+
+    def test_vocab_practice_flow(self) -> None:
+        self.app.navigate("vocab")
+        self.pump()
+        page = self.app.pages["vocab"]
+        page.start_study()
+        self.pump()
+        self.assertEqual(page.mode, "study")
+        self.assertIsNotNone(page.current_word)
+        correct_index = next(
+            index
+            for index, choice in enumerate(page.choices)
+            if choice.correct
+        )
+        page._choose(correct_index)
+        self.pump()
+        self.assertEqual(len(self.store.get_all_vocab_progress()), 1)
+        self.assertEqual(
+            self.store.get_vocab_plan_stats(self.app.today)["completed"], 1
+        )
+        first_word = page.current_word.word
+        page._next_word()
+        self.pump()
+        self.assertEqual(page.mode, "study")
+        self.assertNotEqual(page.current_word.word, first_word)
 
     def test_add_task_dialog_submits(self) -> None:
         self.app.navigate("settings")
@@ -90,6 +115,33 @@ class UiSmokeTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_tasks()), before + 1)
         self.assertIsNone(self.app._task_dialog)
         self.pump()
+
+    def test_edit_vocab_target_dialog(self) -> None:
+        task = self.store.get_vocab_task()
+        assert task is not None
+        self.app.open_edit_task(task)
+        self.root.update_idletasks()
+        dialog = self.app._task_dialog
+        self.assertIsNotNone(dialog)
+        assert dialog is not None
+        dialog.withdraw()
+        dialog._target_var.set("12")
+        dialog._submit()
+        self.pump()
+        updated = self.store.get_vocab_task()
+        assert updated is not None
+        self.assertEqual(updated.target, 12)
+        self.assertIsNone(self.app._task_dialog)
+
+    def test_builtin_vocab_task_cannot_be_deleted(self) -> None:
+        task = self.store.get_vocab_task()
+        assert task is not None
+        with patch(
+            "dailygrind.ui.main_window.messagebox.showinfo"
+        ) as warning:
+            self.app.delete_task(task)
+        self.assertTrue(warning.called)
+        self.assertIsNotNone(self.store.get_vocab_task())
 
     def test_delete_task_uses_confirmation(self) -> None:
         task = self.store.list_tasks()[0]
